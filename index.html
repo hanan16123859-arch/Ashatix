@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BWC Asphalt – Control vs Biochar Modified Mixes</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    body{
+      margin:0;
+      font-family: Arial, Helvetica, sans-serif;
+      background:#0b1220;
+      color:#e8eefc;
+    }
+    header{
+      padding:30px;
+      background:#111a2e;
+      border-bottom:1px solid #223057;
+    }
+    h1{margin:0}
+    h2{margin-top:0}
+    .wrap{max-width:1100px;margin:auto;padding:20px}
+    .card{
+      background:#111a2e;
+      border:1px solid #223057;
+      border-radius:12px;
+      padding:20px;
+      margin-bottom:20px;
+    }
+    .grid{
+      display:grid;
+      grid-template-columns: repeat(auto-fit,minmax(300px,1fr));
+      gap:20px;
+    }
+    table{
+      width:100%;
+      border-collapse:collapse;
+      margin-top:10px;
+    }
+    th,td{
+      border-bottom:1px solid #223057;
+      padding:10px;
+      text-align:center;
+    }
+    th{background:#1a2a5a}
+    .ok{color:#2ee59d}
+    .warn{color:#ffd166}
+    .bad{color:#ff5c7a}
+    canvas{max-height:320px}
+  </style>
+</head>
+
+<body>
+
+<header>
+  <h1>BWC Asphalt Performance Analysis</h1>
+  <p>
+    Comparison between <b>Control Mix</b>, <b>2% Biochar</b>, and <b>5% Biochar</b><br>
+    Asphalt Wearing Course – Bitumen Grade 60/70
+  </p>
+</header>
+
+<div class="wrap">
+
+  <!-- Overview -->
+  <div class="card">
+    <h2>Project Overview</h2>
+    <p>
+      This study evaluates the effect of biochar modification on asphalt performance.
+      Two biochar contents (2% and 5%) were compared with a control mix using
+      Marshall properties and volumetric analysis.
+    </p>
+  </div>
+
+  <!-- KPI Table -->
+  <div class="card">
+    <h2>Key Results Summary</h2>
+    <table>
+      <tr>
+        <th>Property</th>
+        <th>Specification</th>
+        <th>Control</th>
+        <th>Biochar 2%</th>
+        <th>Biochar 5%</th>
+      </tr>
+      <tr>
+        <td>Bitumen Content (%)</td>
+        <td>4.1 ± 0.2</td>
+        <td>4.20 <span class="ok">✔</span></td>
+        <td>4.26 <span class="ok">✔</span></td>
+        <td>4.34 <span class="warn">▲</span></td>
+      </tr>
+      <tr>
+        <td>Stability (kg)</td>
+        <td>≥ 1400</td>
+        <td>1510 <span class="ok">✔</span></td>
+        <td>1544 <span class="ok">✔</span></td>
+        <td>1912 <span class="ok">✔</span></td>
+      </tr>
+      <tr>
+        <td>Flow (mm)</td>
+        <td>2 – 4</td>
+        <td>2.8 <span class="ok">✔</span></td>
+        <td>2.1 <span class="ok">✔</span></td>
+        <td>1.2 <span class="bad">✖</span></td>
+      </tr>
+      <tr>
+        <td>VIM (%)</td>
+        <td>4 – 7</td>
+        <td>6.1 <span class="ok">✔</span></td>
+        <td>6.4 <span class="ok">✔</span></td>
+        <td>4.9 <span class="ok">✔</span></td>
+      </tr>
+      <tr>
+        <td>VMA (%)</td>
+        <td>14 – 15</td>
+        <td>14.7 <span class="ok">✔</span></td>
+        <td>15.5 <span class="warn">▲</span></td>
+        <td>14.2 <span class="ok">✔</span></td>
+      </tr>
+      <tr>
+        <td>VFB (%)</td>
+        <td>60 – 70</td>
+        <td>58.2 <span class="warn">▲</span></td>
+        <td>58.5 <span class="warn">▲</span></td>
+        <td>65.5 <span class="ok">✔</span></td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- Charts -->
+  <div class="grid">
+    <div class="card">
+      <h2>Marshall Stability Comparison</h2>
+      <canvas id="stabilityChart"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>Flow Comparison</h2>
+      <canvas id="flowChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Interpretation -->
+  <div class="card">
+    <h2>Engineering Interpretation</h2>
+    <ul>
+      <li>Biochar significantly increased Marshall stability, especially at 5%.</li>
+      <li>However, 5% biochar caused excessive stiffness, leading to flow values below specification.</li>
+      <li>2% biochar provided the best balance between strength and flexibility.</li>
+      <li>5% biochar may still be suitable for heavy-load roads such as truck lanes.</li>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+new Chart(document.getElementById("stabilityChart"),{
+  type:"bar",
+  data:{
+    labels:["Control","Biochar 2%","Biochar 5%"],
+    datasets:[{
+      label:"Stability (kg)",
+      data:[1510,1544,1912]
+    }]
+  }
+});
+
+new Chart(document.getElementById("flowChart"),{
+  type:"bar",
+  data:{
+    labels:["Control","Biochar 2%","Biochar 5%"],
+    datasets:[{
+      label:"Flow (mm)",
+      data:[2.8,2.1,1.2]
+    }]
+  }
+});
+</script>
+
+</body>
+</html>
