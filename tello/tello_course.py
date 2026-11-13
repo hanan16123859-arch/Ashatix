@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-برنامج التحكم التفاعلي بطائرة Tello لمسار (القيادة والتحكم)
+Tello interactive course controller (Leading & Control track)
 =============================================================
 
-الفكرة: الطائرة تبقى في الهواء، وأنت تدخل القياسات خطوة بخطوة.
-كل خطوة تُنفَّذ ثم تبقى عليها حتى تتأكد؛ تستطيع التعديل (زيادة/نقصان)
-بدون هبوط وبدون إعادة المسار من البداية. عند الضغط على Enter تنتقل
-للخطوة التالية. القيم التي جرّبتها تُحفظ تلقائياً لتكون هي الافتراضية
-في المرة القادمة.
+The drone stays in the air while you enter the measurements step by step.
+Each step runs, then waits on the same step so you can adjust it
+(add / subtract) without landing or restarting the course. Press Enter
+to go to the next step. The values you tried are saved automatically
+and become the defaults next time.
 
-التشغيل:
-    python tello_course.py                 # الطائرة الحقيقية (اتصل بشبكة Tello أولاً)
-    python tello_course.py --ip 127.0.0.1  # مع المحاكي tello_sim.py للتدريب
-    python tello_course.py --free          # وضع الأوامر الحرة فقط (بدون مسار)
+Run:
+    python tello_course.py                 # real drone (connect to TELLO-xxxx Wi-Fi first)
+    python tello_course.py --ip 127.0.0.1  # with the simulator tello_sim.py
+    python tello_course.py --free          # free commands only (no course)
+    python tello_course.py --reset         # reset course values to defaults
 
-لا يحتاج أي مكتبات إضافية (Python 3.7+ فقط).
+No extra libraries needed (Python 3.7+).
 """
 
 import argparse
@@ -27,93 +27,84 @@ import sys
 import threading
 import time
 
-# عرض العربية بشكل صحيح في الطرفية (ويندوز خصوصاً)
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stdin.reconfigure(encoding="utf-8")
-except Exception:
-    pass
-
 TELLO_PORT = 8889
 LOCAL_PORT = 9000
-MIN_MOVE = 20      # أقل حركة يقبلها Tello (سم)
-MAX_MOVE = 500     # أكبر حركة في أمر واحد (سم)
-KEEPALIVE_SEC = 7  # Tello يهبط تلقائياً إذا لم يستقبل أمراً خلال 15 ثانية
+MIN_MOVE = 20      # smallest move Tello accepts (cm)
+MAX_MOVE = 500     # largest move in one command (cm)
+KEEPALIVE_SEC = 7  # Tello auto-lands after 15 s without commands
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SETTINGS = os.path.join(HERE, "course_settings.json")
+DEFAULT_SETTINGS = os.path.join(HERE, "course_settings_en.json")
 
 # ---------------------------------------------------------------------------
-# المسار الافتراضي (يمكن تعديله من الملف course_settings.json)
-# أنواع الخطوات:
-#   takeoff                 إقلاع
-#   height  value=سم        الذهاب إلى ارتفاع محدد (يقيس الارتفاع بالحساس ويصحح)
-#   move    dir=forward/back/left/right/up/down  value=سم
-#   rotate  dir=cw (يمين) / ccw (يسار)  value=درجات
-#   land                    هبوط
+# Default course (edit course_settings_en.json to change it)
+# Step types:
+#   takeoff
+#   height  value=cm          go to an exact height (measures and corrects)
+#   move    dir=forward/back/left/right/up/down  value=cm
+#   rotate  dir=cw (right) / ccw (left)          value=degrees
+#   land
 # ---------------------------------------------------------------------------
 DEFAULT_COURSE = {
     "speed": 40,
     "steps": [
-        {"type": "takeoff", "title": "الإقلاع"},
-        {"type": "height", "value": 100, "title": "ضبط ارتفاع الإقلاع (لعبور الحلقة 1)"},
-        {"type": "move", "dir": "forward", "value": 80, "title": "تقدم لعبور الحلقة 1"},
-        {"type": "height", "value": 50, "title": "النزول لارتفاع عبور المستطيل 2"},
-        {"type": "move", "dir": "forward", "value": 180, "title": "تقدم لعبور المستطيل 2"},
-        {"type": "height", "value": 110, "title": "الارتفاع لعبور الحلقة 3"},
-        {"type": "move", "dir": "right", "value": 0, "title": "إزاحة جانبية للحلقة 3 (موجب=يمين، سالب=يسار، 0=لا شيء)"},
-        {"type": "move", "dir": "forward", "value": 100, "title": "تقدم لعبور الحلقة 3"},
-        {"type": "rotate", "dir": "cw", "value": 0, "title": "لف يمين (درجات، 0=لا شيء)"},
-        {"type": "move", "dir": "forward", "value": 100, "title": "تقدم لعبور الحلقة 4"},
-        {"type": "rotate", "dir": "ccw", "value": 0, "title": "لف يسار (درجات، 0=لا شيء)"},
-        {"type": "move", "dir": "forward", "value": 40, "title": "تقدم نحو نقطة الهبوط"},
-        {"type": "land", "title": "الهبوط"},
+        {"type": "takeoff", "title": "Takeoff"},
+        {"type": "height", "value": 100, "title": "Set height for ring 1"},
+        {"type": "move", "dir": "forward", "value": 80, "title": "Forward through ring 1"},
+        {"type": "height", "value": 50, "title": "Go down for rectangle 2"},
+        {"type": "move", "dir": "forward", "value": 180, "title": "Forward through rectangle 2"},
+        {"type": "height", "value": 110, "title": "Go up for ring 3"},
+        {"type": "move", "dir": "right", "value": 0, "title": "Side shift for ring 3 (+ right, - left, 0 none)"},
+        {"type": "move", "dir": "forward", "value": 100, "title": "Forward through ring 3"},
+        {"type": "rotate", "dir": "cw", "value": 0, "title": "Turn right (degrees, 0 none)"},
+        {"type": "move", "dir": "forward", "value": 100, "title": "Forward through ring 4"},
+        {"type": "rotate", "dir": "ccw", "value": 0, "title": "Turn left (degrees, 0 none)"},
+        {"type": "move", "dir": "forward", "value": 40, "title": "Forward to landing pad"},
+        {"type": "land", "title": "Land"},
     ],
 }
 
 OPPOSITE = {"forward": "back", "back": "forward", "left": "right",
             "right": "left", "up": "down", "down": "up", "cw": "ccw", "ccw": "cw"}
 
-DIR_AR = {"forward": "أمام", "back": "خلف", "left": "يسار", "right": "يمين",
-          "up": "أعلى", "down": "أسفل", "cw": "لف يمين", "ccw": "لف يسار"}
+DIR_NAME = {"forward": "forward", "back": "back", "left": "left", "right": "right",
+            "up": "up", "down": "down", "cw": "turn right", "ccw": "turn left"}
 
-# اختصارات الأوامر الحرة (إنجليزي وعربي)
 ALIASES = {
-    "f": "forward", "forward": "forward", "تقدم": "forward", "ق": "forward",
-    "b": "back", "back": "back", "رجوع": "back", "خلف": "back",
-    "l": "left", "left": "left", "يسار": "left",
-    "r": "right", "right": "right", "يمين": "right",
-    "u": "up", "up": "up", "ارتفع": "up", "فوق": "up",
-    "d": "down", "down": "down", "انزل": "down", "تحت": "down",
-    "cw": "cw", "لف_يمين": "cw", "لفيمين": "cw",
-    "ccw": "ccw", "لف_يسار": "ccw", "لفيسار": "ccw",
+    "f": "forward", "forward": "forward",
+    "b": "back", "back": "back",
+    "l": "left", "left": "left",
+    "r": "right", "right": "right",
+    "u": "up", "up": "up",
+    "d": "down", "down": "down",
+    "cw": "cw", "ccw": "ccw",
 }
 
 HELP = """
-أوامر يمكنك كتابتها في أي وقت (القيم بالسنتيمتر، واللف بالدرجات):
-  f 30  / تقدم 30      تقدم للأمام          b 30  / رجوع 30   للخلف
-  l 20  / يسار 20      إزاحة يسار           r 20  / يمين 20   إزاحة يمين
-  u 20  / ارتفع 20     ارتفاع               d 20  / انزل 20   نزول
-  cw 90 / لف_يمين 90   دوران يمين           ccw 90 / لف_يسار 90  دوران يسار
-  h 60  / ارتفاع 60    اذهب إلى ارتفاع 60 سم (يقيس ويصحح تلقائياً)
-  speed 30             تغيير السرعة (10-100 سم/ث)
-  stop / ثبات          تثبيت الطائرة مكانها
-  bat / بطارية         نسبة البطارية       alt / كم           الارتفاع الحالي
-  land / هبوط          هبوط                 e / طوارئ          إيقاف المحركات فوراً!
-  takeoff / اقلاع      إقلاع
-  next / Enter         الخطوة التالية       prev / سابق        الرجوع خطوة في القائمة
-  goto 5 / خطوة 5      الانتقال لخطوة معينة   list / قائمة       عرض خطوات المسار
-  help / مساعدة        هذه القائمة          quit / خروج        هبوط وخروج
+Commands you can type at any time (distances in cm, turns in degrees):
+  f 30     forward 30          b 30     back 30
+  l 20     left 20             r 20     right 20
+  u 20     up 20               d 20     down 20
+  cw 90    turn right 90       ccw 90   turn left 90
+  h 60     go to height 60 cm (measures and corrects automatically)
+  speed 30 set speed (10-100 cm/s)
+  stop     hover in place
+  bat      battery %           alt      current height
+  takeoff  take off            land     land
+  e        EMERGENCY - stop motors immediately!
+  next / Enter  next step      prev     previous step
+  goto 5   jump to step 5      list     show course steps
+  help     this list           quit     land and exit
 
-داخل خطوة المسار: اكتب رقماً فقط لتنفيذ إضافة بنفس اتجاه الخطوة
-(مثلاً 20 = 20 سم إضافية، -10 = 10 سم بعكس الاتجاه). في خطوة الارتفاع
-الرقم يعني الارتفاع المطلوب مباشرة.
-* الحركات الأقل من 20 سم تُنفَّذ بحيلة (تحرك عكسي 20 ثم أمامي 20+القيمة).
+Inside a course step: type just a number to add more in the step's
+direction (20 = 20 cm more, -10 = 10 cm the opposite way).
+In a height step the number is the target height itself.
+* Moves under 20 cm are done in two moves (back 20, then forward 20+value).
 """
 
 
 class Tello:
-    """اتصال UDP مباشر مع Tello (SDK 2.0)."""
+    """Direct UDP link to Tello (SDK 2.0)."""
 
     def __init__(self, ip="192.168.10.1", verbose=True):
         self.addr = (ip, TELLO_PORT)
@@ -142,7 +133,7 @@ class Tello:
         with self.lock:
             self._flush()
             if self.verbose and not quiet:
-                print(f"   ← إرسال: {cmd}")
+                print(f"   >> send: {cmd}")
             self.sock.sendto(cmd.encode("utf-8"), self.addr)
             self.last_cmd_time = time.time()
             self.sock.settimeout(timeout)
@@ -151,15 +142,17 @@ class Tello:
                 resp = data.decode("utf-8", errors="ignore").strip()
             except socket.timeout:
                 resp = "timeout"
+            except OSError as e:
+                resp = f"error {e}"
             self.last_cmd_time = time.time()
         if self.verbose and not quiet:
-            print(f"   → رد الطائرة: {resp}")
+            print(f"   << drone: {resp}")
         return resp
 
     def send_no_wait(self, cmd):
-        """لأوامر الطوارئ: ترسل فوراً دون انتظار القفل."""
+        """For emergency: send right away without waiting."""
         self.sock.sendto(cmd.encode("utf-8"), self.addr)
-        print(f"   ← إرسال فوري: {cmd}")
+        print(f"   >> send now: {cmd}")
 
     def _keepalive(self):
         while not self._stop:
@@ -192,7 +185,7 @@ class Tello:
         return int(r) if r.isdigit() else None
 
     def altitude(self):
-        """الارتفاع بالسم من حساس المسافة السفلي (tof)، وإلا من height?."""
+        """Height in cm from the bottom distance sensor (tof), else height?."""
         r = self.send("tof?", timeout=5, quiet=True)
         m = re.search(r"(\d+)", r)
         if m and "error" not in r.lower():
@@ -225,7 +218,7 @@ class Tello:
         return self.ok(self.send(f"{direction} {int(cm)}", timeout=25))
 
     def move(self, direction, cm):
-        """حركة بأي قيمة: تقسم الكبيرة وتعالج الصغيرة (<20)."""
+        """Move any distance: splits big moves, handles small (<20) ones."""
         cm = int(round(cm))
         if cm == 0:
             return True
@@ -237,8 +230,7 @@ class Tello:
             cm -= MAX_MOVE
         if cm >= MIN_MOVE:
             return ok and self._raw_move(direction, cm)
-        # حركة صغيرة < 20 سم
-        print(f"   (حركة صغيرة {cm} سم: تنفيذ بخطوتين)")
+        print(f"   (small move {cm} cm: done in two moves)")
         if direction == "up":
             return ok and self._raw_move("up", MIN_MOVE + cm) and self._raw_move("down", MIN_MOVE)
         return ok and self._raw_move(OPPOSITE[direction], MIN_MOVE) and \
@@ -256,17 +248,17 @@ class Tello:
     def go_height(self, target):
         cur = self.altitude()
         if cur is None:
-            print("   ⚠ تعذّرت قراءة الارتفاع.")
+            print("   ! Could not read the height.")
             return False
         diff = target - cur
-        print(f"   الارتفاع الحالي ≈ {cur} سم، المطلوب {target} سم (الفرق {diff:+d})")
+        print(f"   Height now ~{cur} cm, target {target} cm (difference {diff:+d})")
         if abs(diff) < 5:
-            print("   الارتفاع مناسب، لا حاجة للحركة.")
+            print("   Height is OK, no move needed.")
             return True
         ok = self.move("up", diff)
         after = self.altitude()
         if after is not None:
-            print(f"   الارتفاع الآن ≈ {after} سم")
+            print(f"   Height now ~{after} cm")
         return ok
 
     def set_speed(self, v):
@@ -281,7 +273,7 @@ def load_settings(path):
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"⚠ خطأ في قراءة {path}: {e}  — سيتم استخدام المسار الافتراضي")
+            print(f"! Error reading {path}: {e} -- using the default course")
     save_settings(path, DEFAULT_COURSE)
     return json.loads(json.dumps(DEFAULT_COURSE))
 
@@ -291,12 +283,12 @@ def save_settings(path, data):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"⚠ لم يتم حفظ الإعدادات: {e}")
+        print(f"! Settings not saved: {e}")
 
 
 def parse_number(s):
     try:
-        return float(s.replace("،", ".").replace(",", "."))
+        return float(s.replace(",", "."))
     except ValueError:
         return None
 
@@ -305,10 +297,10 @@ def step_text(i, st):
     t = st["type"]
     title = st.get("title", "")
     if t in ("move", "rotate"):
-        unit = "°" if t == "rotate" else " سم"
-        return f"{i + 1:>2}. {title}  [{DIR_AR[st['dir']]} {st.get('value', 0)}{unit}]"
+        unit = " deg" if t == "rotate" else " cm"
+        return f"{i + 1:>2}. {title}  [{DIR_NAME[st['dir']]} {st.get('value', 0)}{unit}]"
     if t == "height":
-        return f"{i + 1:>2}. {title}  [ارتفاع {st.get('value', 0)} سم]"
+        return f"{i + 1:>2}. {title}  [height {st.get('value', 0)} cm]"
     return f"{i + 1:>2}. {title}"
 
 
@@ -335,47 +327,47 @@ class Pilot:
             else:
                 self.t.move(d, arg)
             return True
-        if c in ("h", "ارتفاع") and arg is not None:
+        if c == "h" and arg is not None:
             if 20 <= arg <= 300:
                 self.t.go_height(int(arg))
             else:
-                print("   الارتفاع يجب أن يكون بين 20 و 300 سم.")
+                print("   Height must be between 20 and 300 cm.")
             return True
-        if c in ("speed", "سرعة") and arg is not None:
+        if c == "speed" and arg is not None:
             if self.t.set_speed(arg):
                 self.s["speed"] = int(arg)
                 save_settings(self.path, self.s)
             return True
-        if c in ("stop", "ثبات"):
+        if c == "stop":
             self.t.send("stop")
             return True
-        if c in ("bat", "battery", "بطارية"):
-            print(f"   البطارية: {self.t.battery()}%")
+        if c in ("bat", "battery"):
+            print(f"   Battery: {self.t.battery()}%")
             return True
-        if c in ("alt", "كم", "tof"):
-            print(f"   الارتفاع ≈ {self.t.altitude()} سم")
+        if c in ("alt", "tof"):
+            print(f"   Height ~{self.t.altitude()} cm")
             return True
-        if c in ("takeoff", "اقلاع", "إقلاع"):
+        if c == "takeoff":
             self.t.takeoff()
             return True
-        if c in ("land", "هبوط"):
+        if c == "land":
             self.t.land()
             return True
-        if c in ("e", "emergency", "طوارئ"):
+        if c in ("e", "emergency"):
             self.t.emergency()
             return True
-        if c in ("help", "?", "مساعدة"):
+        if c in ("help", "?"):
             print(HELP)
             return True
-        if c in ("list", "قائمة"):
+        if c == "list":
             self.show_course()
             return True
         return False
 
     def show_course(self):
-        print("\n—— خطوات المسار ——")
+        print("\n--- Course steps ---")
         for k, st in enumerate(self.steps):
-            mark = "◀" if k == self.i else " "
+            mark = ">" if k == self.i else " "
             print(f"{mark} {step_text(k, st)}")
         print()
 
@@ -395,67 +387,66 @@ class Pilot:
         return False
 
     def course(self):
-        print("\n=========== وضع المسار خطوة بخطوة ===========")
-        print("Enter = تنفيذ القيمة الافتراضية / الانتقال للتالي")
-        print("رقم   = تنفيذ بقيمة مختلفة أو إضافة تعديل")
-        print("s     = تخطي الخطوة بدون تنفيذ،  help = كل الأوامر\n")
+        print("\n=========== STEP BY STEP COURSE ===========")
+        print("Enter  = run default value / go to next step")
+        print("number = run with another value or add an adjustment")
+        print("s      = skip step,   help = all commands\n")
         self.show_course()
 
         while self.i < len(self.steps):
             st = self.steps[self.i]
             executed = False
-            total = 0.0  # مجموع ما نُفذ في هذه الخطوة (move/rotate)
-            print("─" * 55)
-            print(f"الخطوة {step_text(self.i, st)}")
+            total = 0.0  # total done in this step (move/rotate)
+            print("-" * 55)
+            print(f"STEP {step_text(self.i, st)}")
 
             while True:
                 t = st["type"]
                 if not executed:
                     if t in ("takeoff", "land"):
-                        hint = "Enter=تنفيذ، s=تخطي"
+                        hint = "Enter=run, s=skip"
                     elif t == "height":
-                        hint = f"الارتفاع المطلوب سم [Enter={st.get('value')}]"
+                        hint = f"target height cm [Enter={st.get('value')}]"
                     else:
-                        unit = "درجة" if t == "rotate" else "سم"
-                        hint = f"المقدار {unit} [Enter={st.get('value')}]"
+                        unit = "deg" if t == "rotate" else "cm"
+                        hint = f"amount {unit} [Enter={st.get('value')}]"
                 else:
                     if t == "height":
-                        hint = "✔ Enter=التالي | رقم=ارتفاع جديد"
+                        hint = "DONE | Enter=next | number=new height"
                     elif t in ("move", "rotate"):
-                        hint = (f"✔ نُفذ {total:g} | Enter=التالي | رقم=إضافة "
-                                f"(سالب=عكس الاتجاه)")
+                        hint = f"DONE {total:g} | Enter=next | number=add more (- = opposite)"
                     else:
-                        hint = "✔ Enter=التالي"
+                        hint = "DONE | Enter=next"
                 try:
                     line = input(f"  {hint} > ").strip()
                 except EOFError:
                     line = "quit"
 
                 low = line.lower()
-                if low in ("quit", "exit", "q", "خروج"):
+                if low in ("quit", "exit", "q"):
                     return "quit"
-                if low in ("s", "skip", "تخطي") or (executed and low in ("", "next", "n", "التالي")):
+                if low in ("s", "skip") or (executed and low in ("", "next", "n")):
                     self._remember(st, executed, total)
                     self.i += 1
                     break
-                if low in ("prev", "p", "سابق"):
+                if low in ("prev", "p"):
                     self._remember(st, executed, total)
                     self.i = max(0, self.i - 1)
                     break
-                m = re.match(r"^(goto|خطوة)\s+(\d+)$", low)
+                m = re.match(r"^goto\s+(\d+)$", low)
                 if m:
                     self._remember(st, executed, total)
-                    self.i = max(0, min(len(self.steps) - 1, int(m.group(2)) - 1))
+                    self.i = max(0, min(len(self.steps) - 1, int(m.group(1)) - 1))
                     break
 
-                # Enter على خطوة لم تنفذ = القيمة الافتراضية
+                # Enter on a step not yet run = default value
                 if line == "":
                     value = st.get("value", 0)
                 else:
                     value = parse_number(line)
                     if value is None:
                         if not self.free_command(line):
-                            print("   ؟ أمر غير معروف — اكتب help")
+                            print("   ? Unknown command - type help")
                         continue
 
                 if t in ("takeoff", "land"):
@@ -463,12 +454,12 @@ class Pilot:
                         self.run_step(st, 0)
                         executed = True
                     else:
-                        print("   هذه الخطوة لا تحتاج رقماً.")
+                        print("   This step needs no number.")
                     continue
 
                 if t == "height":
                     if not 20 <= value <= 300:
-                        print("   الارتفاع يجب أن يكون بين 20 و 300 سم.")
+                        print("   Height must be between 20 and 300 cm.")
                         continue
                     self.run_step(st, value)
                     st["value"] = int(value)
@@ -479,80 +470,79 @@ class Pilot:
                 # move / rotate
                 if value == 0:
                     if not executed:
-                        print("   القيمة 0: لا حركة. (Enter مرة أخرى للانتقال)")
+                        print("   Value 0: no move. (press Enter again for next step)")
                         executed = True
                     continue
                 if self.run_step(st, value):
                     total += value
                 executed = True
 
-        print("\n✔ انتهت خطوات المسار. يمكنك الاستمرار بالأوامر الحرة أو كتابة quit.")
+        print("\nCourse finished. You can keep using free commands or type quit.")
 
     def _remember(self, st, executed, total):
-        """حفظ القيمة المجربة لتصبح الافتراضية في المرة القادمة."""
+        """Save the tried value as the new default."""
         if executed and st["type"] in ("move", "rotate") and total != 0:
-            st["value"] = int(total)  # السالب يعني الاتجاه المعاكس
+            st["value"] = int(total)  # negative = opposite direction
             save_settings(self.path, self.s)
-            print(f"   (حُفظت القيمة {int(total)} لهذه الخطوة)")
+            print(f"   (saved value {int(total)} for this step)")
 
     def free_mode(self):
-        print("\n=========== وضع الأوامر الحرة ===========")
+        print("\n=========== FREE COMMANDS ===========")
         print(HELP)
         while True:
             try:
-                line = input("أمر > ").strip()
+                line = input("command > ").strip()
             except EOFError:
                 return
-            if line.lower() in ("quit", "exit", "q", "خروج"):
+            if line.lower() in ("quit", "exit", "q"):
                 return
-            if line in ("course", "مسار"):
+            if line.lower() == "course":
                 if self.i >= len(self.steps):
                     self.i = 0
                 if self.course() == "quit":
                     return
                 continue
             if line and not self.free_command(line):
-                print("   ؟ أمر غير معروف — اكتب help")
+                print("   ? Unknown command - type help")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="تحكم تفاعلي بمسار Tello")
-    ap.add_argument("--ip", default="192.168.10.1", help="عنوان الطائرة (127.0.0.1 للمحاكي)")
-    ap.add_argument("--settings", default=DEFAULT_SETTINGS, help="ملف قياسات المسار")
-    ap.add_argument("--free", action="store_true", help="وضع الأوامر الحرة فقط")
-    ap.add_argument("--reset", action="store_true", help="إرجاع المسار للقيم الافتراضية")
+    ap = argparse.ArgumentParser(description="Tello interactive course control")
+    ap.add_argument("--ip", default="192.168.10.1", help="drone IP (127.0.0.1 for simulator)")
+    ap.add_argument("--settings", default=DEFAULT_SETTINGS, help="course settings file")
+    ap.add_argument("--free", action="store_true", help="free commands only")
+    ap.add_argument("--reset", action="store_true", help="reset course to default values")
     args = ap.parse_args()
 
     if args.reset and os.path.exists(args.settings):
         os.remove(args.settings)
     settings = load_settings(args.settings)
 
-    print("جاري الاتصال بالطائرة ...")
+    print("Connecting to drone ...")
     tello = Tello(args.ip)
     if not tello.connect():
-        print("✖ لم يتم الاتصال. تأكد أنك متصل بشبكة الواي فاي TELLO-xxxx وأن الطائرة مشغلة.")
+        print("X Not connected. Make sure you are on the TELLO-xxxx Wi-Fi and the drone is on.")
         tello.close()
         return
     bat = tello.battery()
-    print(f"✔ تم الاتصال. البطارية: {bat}%")
+    print(f"OK Connected. Battery: {bat}%")
     if bat is not None and bat < 20:
-        print("⚠ البطارية منخفضة (أقل من 20%) — قد ترفض الطائرة الإقلاع.")
+        print("! Battery low (under 20%) - the drone may refuse to take off.")
     tello.set_speed(settings.get("speed", 40))
 
     pilot = Pilot(tello, settings, args.settings)
     try:
         if args.free:
             pilot.free_mode()
-        else:
-            if pilot.course() != "quit" and tello.flying:
-                pilot.free_mode()
+        elif pilot.course() != "quit" and tello.flying:
+            pilot.free_mode()
     except KeyboardInterrupt:
-        print("\n⚠ Ctrl+C — هبوط ...")
+        print("\n! Ctrl+C - landing ...")
     finally:
         if tello.flying:
             tello.land()
         tello.close()
-        print("تم الإغلاق.")
+        print("Closed.")
 
 
 if __name__ == "__main__":

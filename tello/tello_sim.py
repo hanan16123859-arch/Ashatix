@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""محاكي بسيط لطائرة Tello للتدريب على البرنامج بدون طائرة.
-شغّله في نافذة:   python tello_sim.py
-ثم في نافذة أخرى: python tello_course.py --ip 127.0.0.1
+"""Simple Tello simulator for practice without a drone.
+Run in one window:   python tello_sim.py
+Then in another:     python tello_course.py --ip 127.0.0.1
 """
 import socket
 import time
@@ -10,7 +9,7 @@ import time
 pos = {"x": 0, "y": 0, "z": 0, "yaw": 0, "flying": False}
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("127.0.0.1", 8889))
-print("محاكي Tello يعمل على 127.0.0.1:8889")
+print("Tello simulator running on 127.0.0.1:8889")
 
 while True:
     data, addr = s.recvfrom(1024)
@@ -39,5 +38,5 @@ while True:
             pos[d[0]] += d[1] * v
             time.sleep(0.3)
     if c != "battery?":
-        print(f"{cmd:<14} -> {resp:<20} موقع: أمام={pos['x']} يمين={pos['y']} ارتفاع={pos['z']} زاوية={pos['yaw']}")
+        print(f"{cmd:<14} -> {resp:<20} pos: forward={pos['x']} right={pos['y']} height={pos['z']} yaw={pos['yaw']}")
     s.sendto(resp.encode(), addr)
