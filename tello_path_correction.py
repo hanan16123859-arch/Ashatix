@@ -38,7 +38,7 @@ LOOP_HZ = 20                # عدد القراءات في الثانية
 SPEED_TO_CM_S = 10
 # إذا وجدت أن الطائرة تصحح بالعكس، غيّر هذه القيمة إلى -1
 # (موجب = انحراف لليمين)
-SIGN_Y = 1
+SIGN_Y = -1  # مُعدَّلة بعد تجربة حقيقية: كان التصحيح بالعكس مع 1
 
 
 # ------------------ طائرة وهمية للتجربة ------------------
@@ -70,7 +70,7 @@ class FakeTello:
         self.y += self.vy / LOOP_HZ
 
     def get_speed_y(self):
-        return round(self.vy / SPEED_TO_CM_S)
+        return round(-self.vy / SPEED_TO_CM_S)  # إشارة معكوسة مثل الطائرة الحقيقية
 
     def move_right(self, cm):
         self.y += cm

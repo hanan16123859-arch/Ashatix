@@ -57,7 +57,7 @@ STABILIZE_SEC = 1.0         # انتظار للثبات بعد الإقلاع
 LOOP_HZ = 20
 
 SPEED_TO_CM_S = 10          # vgy بوحدة dm/s -> cm/s
-SIGN_Y = 1                  # غيّرها إلى -1 إذا كان التصحيح بالعكس (موجب = يمين)
+SIGN_Y = -1                 # مُعدَّلة بعد تجربة حقيقية: كان التصحيح بالعكس مع 1
 
 
 # ------------------ متتبع الانحراف ------------------
@@ -230,7 +230,8 @@ class FakeTello:
     def land(self): self.flying = False; print(f"[sim] land | الموضع الجانبي الحقيقي = {self.y:+.1f} سم")
     def end(self): pass
     def get_yaw(self): return 0
-    def get_speed_y(self): return round(self._vy() / SPEED_TO_CM_S)
+    # الطائرة الحقيقية تعطي vgy بإشارة معكوسة (يمين = سالب)، فالمحاكاة تقلّدها
+    def get_speed_y(self): return round(-self._vy() / SPEED_TO_CM_S)
     def rotate_clockwise(self, d): pass
     def rotate_counter_clockwise(self, d): pass
 
