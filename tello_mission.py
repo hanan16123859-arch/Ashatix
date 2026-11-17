@@ -71,6 +71,7 @@ class DriftTracker:
         self.drift = 0.0          # سم، موجب = يمين
         self.bias = 0.0           # خطأ الحساس الثابت (dm/s)
         self.last_raw = 0
+        self.window = []          # قراءات الحساس في القطعة الحالية (للعرض)
         self._samples = None
         self._log = open(LOG_FILE, "w", encoding="utf-8")
         self._log.write("time,raw_vgy,bias,drift_cm,event\n")
@@ -96,6 +97,7 @@ class DriftTracker:
             raw = self.tello.get_speed_y()
             with self._lock:
                 self.last_raw = raw
+                self.window.append(raw)
                 if self._samples is not None:
                     self._samples.append(raw)
                 vy = SIGN_Y * (raw - self.bias) * SPEED_TO_CM_S
@@ -124,6 +126,12 @@ class DriftTracker:
     def get(self):
         with self._lock:
             return self.drift
+
+    def take_window(self):
+        """يرجع قراءات الحساس منذ آخر مرة ويبدأ من جديد."""
+        with self._lock:
+            w, self.window = self.window, []
+        return w
 
     def reset(self):
         with self._lock:
@@ -202,16 +210,44 @@ def do_move(tello, tracker, target_yaw, action, cm):
             "down": tello.move_down}[action]
 
     for chunk in split_distance(cm):
+        tracker.take_window()
         move(chunk)
-        print(f"    {action} {chunk} | الانحراف ≈ {tracker.get():+.1f} سم")
+        w = tracker.take_window()
+        nonzero = sum(1 for r in w if r != 0)
+        rng = f"{min(w)}..{max(w)}" if w else "-"
+        print(f"    {action} {chunk} | الانحراف ≈ {tracker.get():+.1f} سم"
+              f" | قراءات الحساس vgy: {rng} (غير صفر: {nonzero}/{len(w)})")
         correct_drift(tello, tracker)
         correct_heading(tello, target_yaw)
 
 
 # ------------------ تشغيل المهمة ------------------
+MIN_BATTERY = 30            # لا تقلع إذا البطارية أقل من هذا
+
+
+def explain_error(e):
+    msg = str(e)
+    print("\n" + "=" * 50)
+    print("توقفت المهمة بسبب خطأ:")
+    print("  ", msg)
+    if "Motor stop" in msg:
+        print("المعنى: محركات الطائرة متوقفة، يعني الطائرة صارت على الأرض.")
+        print("الأسباب المحتملة: هبوط تلقائي بسبب بطارية ضعيفة أو حرارة عالية،")
+        print("أو اصطدمت بشي، أو الحساس السفلي ما شاف الأرض زين (إضاءة ضعيفة/أرض بدون نقوش).")
+    elif "timeout" in msg.lower() or "No valid response" in msg:
+        print("المعنى: انقطع الاتصال بالطائرة. تأكد إنك متصل بشبكة TELLO وقريب منها.")
+    print("=" * 50)
+
+
 def run(tello):
     tello.connect()
-    print("البطارية:", tello.get_battery(), "%")
+    battery = tello.get_battery()
+    temp = tello.get_temperature()
+    print(f"البطارية: {battery} %  |  الحرارة: {temp:.0f}°C")
+    if battery < MIN_BATTERY:
+        print(f"البطارية أقل من {MIN_BATTERY}% — اشحن الطائرة أولاً.")
+        tello.end()
+        return
     tello.set_speed(MOVE_SPEED)
 
     tracker = DriftTracker(tello)
@@ -232,10 +268,18 @@ def run(tello):
             do_move(tello, tracker, target_yaw, action, cm)
 
         print("\n>> هبوط")
+    except KeyboardInterrupt:
+        print("\nأوقفتها يدوياً (Ctrl+C) -> هبوط")
+    except Exception as e:
+        explain_error(e)
     finally:
         tracker.stop()
-        tello.land()
+        try:
+            tello.land()
+        except Exception:
+            print("(الطائرة على الأرض أصلاً)")
         tello.end()
+        print(f"القراءات محفوظة في: {LOG_FILE}")
 
 
 # ------------------ طائرة وهمية للتجربة ------------------
@@ -269,6 +313,7 @@ class FakeTello:
 
     def connect(self): print("[sim] connected")
     def get_battery(self): return 90
+    def get_temperature(self): return 60
     def set_speed(self, s): pass
     def takeoff(self): self.flying = True; print("[sim] takeoff")
     def land(self): self.flying = False; print(f"[sim] land | الموضع الجانبي الحقيقي = {self.y:+.1f} سم")
