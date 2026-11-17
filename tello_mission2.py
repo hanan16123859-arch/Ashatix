@@ -57,7 +57,6 @@ LOOP_HZ = 20
 
 SPEED_TO_CM_S = 10          # vgy بوحدة dm/s -> cm/s
 SIGN_Y = -1                 # مُعدَّلة بعد تجربة حقيقية: كان التصحيح بالعكس مع 1
-CLIMB_DRIFT_DIR = "left"    # اتجاه انحراف الطائرة وقت الإقلاع/الارتفاع (من التجربة): "left" أو "right" أو None
 FLIP_RIGHT = False          # البداية. يُعكس تلقائياً إذا رأى الحساس حركة يمين كأنها يسار
 LEARN_MIN = 15              # أقل حركة (سم) يجب أن يراها الحساس ليتعلم اتجاه التقدم
 CALIBRATE_SEC = 3.0         # مدة التحويم بعد الإقلاع لقياس خطأ الحساس (الطائرة ثابتة)
@@ -84,7 +83,6 @@ class DriftTracker:
         self.conv = (1, 0)            # (hand, offset) العلاقة بين البوصلة والحساس
         self.flip = FLIP_RIGHT        # يُعكس تلقائياً إذا تبيّن أن اليمين بالعكس
         self._fsum = [0.0, 0.0]       # مجموع قراءات التقدم (لتعلم الاتجاه)
-        self.pending = []             # قراءات الإقلاع (تُضاف لأول ارتفاع)
         self.window = []              # قراءات (vgx, vgy) في القطعة الحالية (للعرض)
         self._samples = None
         self._log = open(LOG_FILE, "w", encoding="utf-8")
@@ -192,13 +190,6 @@ class DriftTracker:
         self._update_axis(yaw_deg)
         self.axis_ok = True
         return measured, err
-
-    def displacement(self, window):
-        """مقدار الحركة الأفقية (سم) لمجموعة قراءات، بدون الحاجة لمعرفة الاتجاه."""
-        bx, by = self.bias
-        dx = sum(vx - bx for vx, _ in window) / LOOP_HZ * SPEED_TO_CM_S
-        dy = sum(vy - by for _, vy in window) / LOOP_HZ * SPEED_TO_CM_S
-        return math.hypot(dx, dy)
 
     def lateral_of(self, window):
         """الانحراف الجانبي (سم) لمجموعة قراءات حسب اتجاه اليمين الحالي."""
@@ -344,32 +335,9 @@ def do_move(tello, tracker, target_yaw, action, cm):
             sensor = f"vgx {min(xs)}..{max(xs)}  vgy {min(ys)}..{max(ys)}"
         else:
             sensor = "-"
-        if action in ("up", "down") and not tracker.axis_ok and CLIMB_DRIFT_DIR:
-            # قبل تعلّم الاتجاه: نقيس مقدار الحركة الأفقية فقط، والاتجاه معروف من التجربة
-            w_all = tracker.pending + w
-            tracker.pending = []
-            dist = tracker.displacement(w_all)
-            print(f"    {action} {chunk} | حركة أفقية ≈ {dist:.0f} سم (الاتجاه المعروف: {CLIMB_DRIFT_DIR})"
-                  f" | الحساس: {sensor}")
-            correct_known_direction(tello, tracker, dist)
-        else:
-            print(f"    {action} {chunk} | الانحراف ≈ {tracker.get():+.1f} سم | الحساس: {sensor}")
-            correct_drift(tello, tracker)
+        print(f"    {action} {chunk} | الانحراف ≈ {tracker.get():+.1f} سم | الحساس: {sensor}")
+        correct_drift(tello, tracker)
         correct_heading(tello, target_yaw)
-
-
-def correct_known_direction(tello, tracker, dist):
-    """تصحيح انحراف الارتفاع باتجاه معروف مسبقاً (عكس CLIMB_DRIFT_DIR)."""
-    if dist < DRIFT_THRESHOLD_CM:
-        return
-    n = min(3, max(1, round(dist / CORRECTION_CM)))
-    fix = "right" if CLIMB_DRIFT_DIR == "left" else "left"
-    name = {"left": "يسار", "right": "يمين"}
-    print(f"    انحرفت {name[CLIMB_DRIFT_DIR]} ≈ {dist:.0f} سم -> {name[fix]} {CORRECTION_CM} × {n}")
-    tracker.event(f"climb fix {fix} x{n} dist={dist:.0f}")
-    for _ in range(n):
-        lateral_move(tello, tracker, fix, CORRECTION_CM)
-    tracker.reset()
 
 
 # ------------------ تشغيل المهمة ------------------
@@ -422,12 +390,10 @@ def run(tello):
     tracker.start()              # يبدأ القياس قبل الإقلاع ليحسب انحراف الإقلاع نفسه
     try:
         target_yaw = tello.get_yaw()
-        tracker.take_window()
         tello.takeoff()
 
         # تثبيت بعد الإقلاع ثم معايرة خطأ الحساس
         time.sleep(STABILIZE_SEC)
-        tracker.pending = tracker.take_window()   # حركة الطائرة أثناء الإقلاع
         print(f">> معايرة 1: خطأ الحساس ({CALIBRATE_SEC:.0f} ثواني تحويم بدون حركة)...")
         (bx, by), n = tracker.calibrate_bias(CALIBRATE_SEC)
         print(f"   خطأ الحساس: vgx={bx:+.2f}  vgy={by:+.2f}  (من {n} قراءة)")
@@ -463,7 +429,6 @@ SIM_SENSOR_BIAS = 0.0
 SIM_ROT = 0.0                # دوران إطار الحساس في المحاكاة (درجات)
 SIM_YAW_ERR = 0.0            # خطأ البوصلة في المحاكاة
 SIM_HAND = 1                 # اتجاه دوران الحساس بالنسبة للبوصلة في المحاكاة (1 أو -1)
-SIM_CLIMB_DRIFT = 15.0       # سرعة الانحراف يسار أثناء الإقلاع/الارتفاع في المحاكاة (سم/ث)
 
 
 class FakeTello:
@@ -475,7 +440,6 @@ class FakeTello:
         self.cmd_vx = 0.0          # سرعة التقدم المأمورة
         self.flying = False
         self.moving = False
-        self.climbing = False
         self.wind = random.choice([-1, 1]) * random.uniform(8, 15)
         self.sensor_bias = SIM_SENSOR_BIAS   # خطأ ثابت في الحساس (dm/s)
         threading.Thread(target=self._physics, daemon=True).start()
@@ -491,18 +455,13 @@ class FakeTello:
 
     def _vy(self):
         # بعد الإقلاع وقبل أول حركة، Tello تثبت نفسها فلا تتأثر بالريح
-        climb = -SIM_CLIMB_DRIFT if self.climbing else 0
-        return (self.wind if self.flying and self.moving else 0) + self.cmd_vy + climb
+        return (self.wind if self.flying and self.moving else 0) + self.cmd_vy
 
     def connect(self): print("[sim] connected")
     def get_battery(self): return 90
     def get_temperature(self): return 60
     def set_speed(self, s): pass
-    def takeoff(self):
-        self.flying = True
-        self._climb(40)             # الإقلاع يستغرق وقتاً مع انحراف يسار
-        self.moving = False
-        print(f"[sim] takeoff | الموضع الجانبي الحقيقي = {self.y:+.1f} سم")
+    def takeoff(self): self.flying = True; print("[sim] takeoff")
     def land(self): self.flying = False; print(f"[sim] land | الموضع الجانبي الحقيقي = {self.y:+.1f} سم")
     def end(self): pass
     def get_yaw(self):
@@ -533,13 +492,8 @@ class FakeTello:
         self.cmd_vx = self.SIM_SPEED
         self._wait(cm)
         self.cmd_vx = 0
-    def _climb(self, cm):
-        self.climbing = True
-        self._wait(cm)
-        self.climbing = False
-
-    def move_up(self, cm): self._climb(cm)
-    def move_down(self, cm): self._climb(cm)
+    def move_up(self, cm): self._wait(cm)
+    def move_down(self, cm): self._wait(cm)
 
     def _side(self, cm, sign):
         self.cmd_vy = sign * self.SIM_SPEED
