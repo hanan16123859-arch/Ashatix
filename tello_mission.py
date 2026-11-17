@@ -58,23 +58,31 @@ LOOP_HZ = 20
 
 SPEED_TO_CM_S = 10          # vgy بوحدة dm/s -> cm/s
 SIGN_Y = -1                 # مُعدَّلة بعد تجربة حقيقية: كان التصحيح بالعكس مع 1
+AXIS_CAL_CM = 30            # مسافة حركة المعايرة يمين/يسار
 CALIBRATE_SEC = 3.0         # مدة التحويم بعد الإقلاع لقياس خطأ الحساس (الطائرة ثابتة)
 LOG_FILE = "flight_log.csv" # ملف تسجيل كل القراءات (أرسله إذا فيه مشكلة)
 
 
 # ------------------ متتبع الانحراف ------------------
 class DriftTracker:
-    """يجمع السرعة الجانبية مع الزمن في الخلفية."""
+    """يجمع السرعة الجانبية مع الزمن في الخلفية.
+
+    Tello تعطي السرعة (vgx, vgy) في إطار غير محاذي لجسم الطائرة بالضرورة،
+    لذلك نتعلم اتجاه "اليمين" في الحساس بحركة يمين تجريبية (calibrate_axis)
+    ثم نأخذ مركّبة السرعة على هذا الاتجاه فقط.
+    """
 
     def __init__(self, tello):
         self.tello = tello
-        self.drift = 0.0          # سم، موجب = يمين
-        self.bias = 0.0           # خطأ الحساس الثابت (dm/s)
-        self.last_raw = 0
-        self.window = []          # قراءات الحساس في القطعة الحالية (للعرض)
+        self.drift = 0.0              # سم، موجب = يمين
+        self.bias = (0.0, 0.0)        # خطأ الحساس الثابت (vgx, vgy) dm/s
+        self.right = (0.0, SIGN_Y)    # اتجاه اليمين في إطار الحساس (يُعاير بعد الإقلاع)
+        self.paused = False
+        self.axis_ok = False          # هل نجحت معايرة اتجاه اليمين
+        self.window = []              # قراءات (vgx, vgy) في القطعة الحالية (للعرض)
         self._samples = None
         self._log = open(LOG_FILE, "w", encoding="utf-8")
-        self._log.write("time,raw_vgy,bias,drift_cm,event\n")
+        self._log.write("time,vgx,vgy,lateral_cm_s,drift_cm,event\n")
         self._t0 = time.time()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -88,44 +96,77 @@ class DriftTracker:
         self._thread.join(timeout=1)
         self._log.close()
 
+    def _lateral(self, vx, vy):
+        """السرعة الجانبية (سم/ث) بعد طرح خطأ الحساس. موجب = يمين."""
+        bx, by = self.bias
+        ux, uy = self.right
+        return ((vx - bx) * ux + (vy - by) * uy) * SPEED_TO_CM_S
+
     def _run(self):
         dt = 1.0 / LOOP_HZ
         last = time.time()
         while not self._stop.is_set():
             time.sleep(dt)
             now = time.time()
-            raw = self.tello.get_speed_y()
+            vx = self.tello.get_speed_x()
+            vy = self.tello.get_speed_y()
             with self._lock:
-                self.last_raw = raw
-                self.window.append(raw)
+                self.window.append((vx, vy))
                 if self._samples is not None:
-                    self._samples.append(raw)
-                vy = SIGN_Y * (raw - self.bias) * SPEED_TO_CM_S
-                self.drift += vy * (now - last)
-                self._log.write(f"{now - self._t0:.2f},{raw},{self.bias:.2f},{self.drift:.1f},\n")
+                    self._samples.append((vx, vy))
+                lat = self._lateral(vx, vy)
+                if not self.paused:
+                    self.drift += lat * (now - last)
+                self._log.write(f"{now - self._t0:.2f},{vx},{vy},{lat:.1f},{self.drift:.1f},\n")
             last = now
 
     def event(self, text):
         with self._lock:
-            self._log.write(f"{time.time() - self._t0:.2f},,,{self.drift:.1f},{text}\n")
+            self._log.write(f"{time.time() - self._t0:.2f},,,,{self.drift:.1f},{text}\n")
             self._log.flush()
 
-    def calibrate(self, seconds):
-        """الطائرة تحوم ثابتة (Tello تثبت نفسها بالكاميرا السفلية)، فالسرعة الحقيقية = 0.
-        أي قراءة غير صفر هي خطأ في الحساس، نأخذ متوسطها ونطرحه من كل القراءات."""
+    def _collect(self, action):
+        """يجمع القراءات أثناء تنفيذ action() ويرجع متوسطها."""
         with self._lock:
             self._samples = []
-        time.sleep(seconds)
+        action()
         with self._lock:
             samples, self._samples = self._samples, None
-            if samples:
-                self.bias = sum(samples) / len(samples)
-            self.drift = 0.0
-        return self.bias, len(samples)
+        n = len(samples)
+        if not n:
+            return (0.0, 0.0), 0
+        return (sum(a for a, _ in samples) / n, sum(b for _, b in samples) / n), n
+
+    def calibrate_bias(self, seconds):
+        """الطائرة تحوم ثابتة، فأي قراءة غير صفر هي خطأ في الحساس."""
+        self.bias, n = self._collect(lambda: time.sleep(seconds))
+        self.reset()
+        return self.bias, n
+
+    def calibrate_axis(self, tello, cm):
+        """يتحرك يمين ثم يسار نفس المسافة، ويتعلم اتجاه اليمين في الحساس."""
+        self.paused = True
+        (mx, my), n = self._collect(lambda: tello.move_right(cm))
+        tello.move_left(cm)
+        time.sleep(0.3)
+        mx -= self.bias[0]
+        my -= self.bias[1]
+        mag = (mx * mx + my * my) ** 0.5
+        ok = mag >= 0.3
+        if ok:
+            self.right = (mx / mag, my / mag)
+        self.axis_ok = ok
+        self.reset()
+        self.paused = False
+        return ok, (mx, my), n
 
     def get(self):
         with self._lock:
             return self.drift
+
+    def adjust(self, cm):
+        with self._lock:
+            self.drift += cm
 
     def take_window(self):
         """يرجع قراءات الحساس منذ آخر مرة ويبدأ من جديد."""
@@ -160,13 +201,21 @@ def angle_diff(a, b):
 
 
 def lateral_move(tello, tracker, direction, cm):
-    """حركة جانبية. المتتبع يستمر بالقياس أثناءها، فيحسب الحركة الفعلية
-    (مع أثر الريح) ويعرف كم بقي من الانحراف بعد التصحيح."""
+    """حركة جانبية.
+    - إذا نجحت معايرة الاتجاه: الحساس يقيس الحركة نفسها (مع أي انحراف أثناءها).
+    - إذا فشلت: نوقف القياس ونحسب الحركة بالمسافة المطلوبة، حتى لا يكرر التصحيح بلا نهاية."""
+    sign = 1 if direction == "right" else -1
+    trust_sensor = tracker.axis_ok
+    if not trust_sensor:
+        tracker.paused = True
     if direction == "right":
         tello.move_right(cm)
     else:
         tello.move_left(cm)
     time.sleep(0.3)
+    if not trust_sensor:
+        tracker.adjust(sign * cm)
+        tracker.paused = False
 
 
 def correct_drift(tello, tracker, max_tries=3):
@@ -213,10 +262,13 @@ def do_move(tello, tracker, target_yaw, action, cm):
         tracker.take_window()
         move(chunk)
         w = tracker.take_window()
-        nonzero = sum(1 for r in w if r != 0)
-        rng = f"{min(w)}..{max(w)}" if w else "-"
-        print(f"    {action} {chunk} | الانحراف ≈ {tracker.get():+.1f} سم"
-              f" | قراءات الحساس vgy: {rng} (غير صفر: {nonzero}/{len(w)})")
+        if w:
+            xs = [a for a, _ in w]
+            ys = [b for _, b in w]
+            sensor = f"vgx {min(xs)}..{max(xs)}  vgy {min(ys)}..{max(ys)}"
+        else:
+            sensor = "-"
+        print(f"    {action} {chunk} | الانحراف ≈ {tracker.get():+.1f} سم | الحساس: {sensor}")
         correct_drift(tello, tracker)
         correct_heading(tello, target_yaw)
 
@@ -258,10 +310,21 @@ def run(tello):
 
         # تثبيت بعد الإقلاع ثم معايرة خطأ الحساس
         time.sleep(STABILIZE_SEC)
-        print(f">> معايرة الحساس ({CALIBRATE_SEC:.0f} ثواني تحويم بدون حركة)...")
-        bias, n = tracker.calibrate(CALIBRATE_SEC)
-        print(f"   خطأ الحساس = {bias:+.2f} dm/s  (من {n} قراءة)")
-        tracker.event(f"calibrated bias={bias:.2f}")
+        print(f">> معايرة 1: خطأ الحساس ({CALIBRATE_SEC:.0f} ثواني تحويم بدون حركة)...")
+        (bx, by), n = tracker.calibrate_bias(CALIBRATE_SEC)
+        print(f"   خطأ الحساس: vgx={bx:+.2f}  vgy={by:+.2f}  (من {n} قراءة)")
+        tracker.event(f"bias vgx={bx:.2f} vgy={by:.2f}")
+
+        print(f">> معايرة 2: اتجاه اليمين (يمين {AXIS_CAL_CM} ثم يسار {AXIS_CAL_CM})...")
+        ok, (mx, my), n = tracker.calibrate_axis(tello, AXIS_CAL_CM)
+        if ok:
+            ux, uy = tracker.right
+            print(f"   أثناء الحركة يمين قرأ الحساس: vgx={mx:+.2f}  vgy={my:+.2f}")
+            print(f"   => اتجاه اليمين = ({ux:+.2f}, {uy:+.2f})")
+        else:
+            print(f"   الحساس ما سجّل الحركة يمين (vgx={mx:+.2f} vgy={my:+.2f})،"
+                  " نستخدم الإعداد الافتراضي")
+        tracker.event(f"axis ok={ok} vgx={mx:.2f} vgy={my:.2f}")
         correct_heading(tello, target_yaw)
 
         for action, cm in MISSION:
@@ -284,6 +347,7 @@ def run(tello):
 
 # ------------------ طائرة وهمية للتجربة ------------------
 SIM_SENSOR_BIAS = 0.0
+SIM_ROT = 0.0                # دوران إطار الحساس في المحاكاة (درجات)
 
 
 class FakeTello:
@@ -292,6 +356,7 @@ class FakeTello:
     def __init__(self):
         self.y = 0.0
         self.cmd_vy = 0.0
+        self.cmd_vx = 0.0          # سرعة التقدم المأمورة
         self.flying = False
         self.moving = False
         self.wind = random.choice([-1, 1]) * random.uniform(8, 15)
@@ -319,15 +384,30 @@ class FakeTello:
     def land(self): self.flying = False; print(f"[sim] land | الموضع الجانبي الحقيقي = {self.y:+.1f} سم")
     def end(self): pass
     def get_yaw(self): return 0
-    # الطائرة الحقيقية تعطي vgy بإشارة معكوسة (يمين = سالب)، فالمحاكاة تقلّدها
-    def get_speed_y(self): return round(-self._vy() / SPEED_TO_CM_S + self.sensor_bias + random.uniform(-0.5, 0.5))
+    def _sensor(self):
+        """الحساس يقيس (تقدم، يمين) في إطار مُدار بزاوية SIM_ROT مثل الطائرة الحقيقية."""
+        import math
+        th = math.radians(SIM_ROT)
+        f, r = self.cmd_vx / SPEED_TO_CM_S, self._vy() / SPEED_TO_CM_S
+        sx = f * math.cos(th) - r * math.sin(th)
+        sy = f * math.sin(th) + r * math.cos(th)
+        return sx, sy
+
+    def get_speed_x(self):
+        return round(self._sensor()[0] + random.uniform(-0.5, 0.5))
+
+    def get_speed_y(self):
+        return round(self._sensor()[1] + self.sensor_bias + random.uniform(-0.5, 0.5))
     def rotate_clockwise(self, d): pass
     def rotate_counter_clockwise(self, d): pass
 
     def _wait(self, cm):
         self.moving = True
         time.sleep(cm / self.SIM_SPEED)
-    def move_forward(self, cm): self._wait(cm)
+    def move_forward(self, cm):
+        self.cmd_vx = self.SIM_SPEED
+        self._wait(cm)
+        self.cmd_vx = 0
     def move_up(self, cm): self._wait(cm)
     def move_down(self, cm): self._wait(cm)
 
@@ -346,10 +426,13 @@ def main():
     parser.add_argument("--simulate", action="store_true", help="تجربة بدون طائرة")
     parser.add_argument("--sim-bias", type=float, default=0.0,
                         help="خطأ حساس وهمي في المحاكاة (dm/s)")
+    parser.add_argument("--sim-rot", type=float, default=-90.0,
+                        help="دوران إطار الحساس في المحاكاة (درجات)")
     args = parser.parse_args()
     if args.simulate:
-        global SIM_SENSOR_BIAS
+        global SIM_SENSOR_BIAS, SIM_ROT
         SIM_SENSOR_BIAS = args.sim_bias
+        SIM_ROT = args.sim_rot
         tello = FakeTello()
     else:
         from djitellopy import Tello
