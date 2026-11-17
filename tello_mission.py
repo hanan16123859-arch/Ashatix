@@ -3,16 +3,8 @@
 =============================================
 
 المسار:
-  1. إقلاع + تثبيت بدون انحراف
-  2. ارتفاع 35 سم        (مع التصحيح)
-  3. تقدم 120 سم         (مع التصحيح)
-  4. نزول 57 سم          (مع التصحيح)
-  5. تقدم 100 سم         (مع التصحيح)
-  6. ارتفاع 95 سم        (مع التصحيح)
-  7. يمين 30 سم
-  8. تقدم 70 سم          (مع التصحيح)
-  9. يسار 50 سم
- 10. هبوط
+  إقلاع + معايرة، ثم الخطوات في قائمة MISSION بالأسفل، ثم هبوط.
+  التقدم/الارتفاع/النزول مع تصحيح الانحراف، ويمين/يسار حركات مقصودة.
 
 طريقة التصحيح:
   - خيط (thread) في الخلفية يقرأ السرعة الجانبية vgy من الطائرة
@@ -37,13 +29,17 @@ import time
 MISSION = [
     ("up", 35),
     ("forward", 120),
-    ("down", 57),
+    ("down", 62),
     ("forward", 100),
     ("up", 95),
-    ("right", 30),
     ("forward", 70),
+    ("right", 35),
+    ("forward", 70),
+    ("down", 35),
     ("left", 50),
 ]
+
+VALID_ACTIONS = {"up", "down", "forward", "right", "left"}
 
 CORRECTED = {"up", "down", "forward"}  # الحركات التي يُطبَّق عليها التصحيح
 
@@ -291,7 +287,24 @@ def explain_error(e):
     print("=" * 50)
 
 
+def check_mission():
+    """يفحص المسار قبل الإقلاع حتى لا يتوقف في الجو بسبب خطأ كتابة."""
+    ok = True
+    for i, step in enumerate(MISSION, 1):
+        action, cm = step
+        if action not in VALID_ACTIONS:
+            print(f"خطأ في الخطوة {i}: '{action}' غير معروفة. المسموح: {sorted(VALID_ACTIONS)}")
+            ok = False
+        if not isinstance(cm, int) or not 20 <= cm <= 500:
+            print(f"خطأ في الخطوة {i}: المسافة {cm} لازم تكون رقم صحيح بين 20 و 500")
+            ok = False
+    return ok
+
+
 def run(tello):
+    if not check_mission():
+        print("صحّح المسار في أعلى الملف ثم أعد التشغيل. الطائرة لم تقلع.")
+        return
     tello.connect()
     battery = tello.get_battery()
     temp = tello.get_temperature()
