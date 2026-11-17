@@ -58,6 +58,8 @@ LOOP_HZ = 20
 
 SPEED_TO_CM_S = 10          # vgy بوحدة dm/s -> cm/s
 SIGN_Y = -1                 # مُعدَّلة بعد تجربة حقيقية: كان التصحيح بالعكس مع 1
+CALIBRATE_SEC = 3.0         # مدة التحويم بعد الإقلاع لقياس خطأ الحساس (الطائرة ثابتة)
+LOG_FILE = "flight_log.csv" # ملف تسجيل كل القراءات (أرسله إذا فيه مشكلة)
 
 
 # ------------------ متتبع الانحراف ------------------
@@ -67,6 +69,12 @@ class DriftTracker:
     def __init__(self, tello):
         self.tello = tello
         self.drift = 0.0          # سم، موجب = يمين
+        self.bias = 0.0           # خطأ الحساس الثابت (dm/s)
+        self.last_raw = 0
+        self._samples = None
+        self._log = open(LOG_FILE, "w", encoding="utf-8")
+        self._log.write("time,raw_vgy,bias,drift_cm,event\n")
+        self._t0 = time.time()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -76,6 +84,8 @@ class DriftTracker:
 
     def stop(self):
         self._stop.set()
+        self._thread.join(timeout=1)
+        self._log.close()
 
     def _run(self):
         dt = 1.0 / LOOP_HZ
@@ -83,10 +93,33 @@ class DriftTracker:
         while not self._stop.is_set():
             time.sleep(dt)
             now = time.time()
-            vy = SIGN_Y * self.tello.get_speed_y() * SPEED_TO_CM_S
+            raw = self.tello.get_speed_y()
             with self._lock:
+                self.last_raw = raw
+                if self._samples is not None:
+                    self._samples.append(raw)
+                vy = SIGN_Y * (raw - self.bias) * SPEED_TO_CM_S
                 self.drift += vy * (now - last)
+                self._log.write(f"{now - self._t0:.2f},{raw},{self.bias:.2f},{self.drift:.1f},\n")
             last = now
+
+    def event(self, text):
+        with self._lock:
+            self._log.write(f"{time.time() - self._t0:.2f},,,{self.drift:.1f},{text}\n")
+            self._log.flush()
+
+    def calibrate(self, seconds):
+        """الطائرة تحوم ثابتة (Tello تثبت نفسها بالكاميرا السفلية)، فالسرعة الحقيقية = 0.
+        أي قراءة غير صفر هي خطأ في الحساس، نأخذ متوسطها ونطرحه من كل القراءات."""
+        with self._lock:
+            self._samples = []
+        time.sleep(seconds)
+        with self._lock:
+            samples, self._samples = self._samples, None
+            if samples:
+                self.bias = sum(samples) / len(samples)
+            self.drift = 0.0
+        return self.bias, len(samples)
 
     def get(self):
         with self._lock:
@@ -134,9 +167,11 @@ def correct_drift(tello, tracker, max_tries=3):
         d = tracker.get()
         if d < -DRIFT_THRESHOLD_CM:
             print(f"    انحرفت يسار {abs(d):.0f} سم -> يمين {CORRECTION_CM}")
+            tracker.event(f"correct_right drift={d:.0f}")
             lateral_move(tello, tracker, "right", CORRECTION_CM)
         elif d > DRIFT_THRESHOLD_CM:
             print(f"    انحرفت يمين {d:.0f} سم -> يسار {CORRECTION_CM}")
+            tracker.event(f"correct_left drift={d:.0f}")
             lateral_move(tello, tracker, "left", CORRECTION_CM)
         else:
             return
@@ -155,6 +190,7 @@ def correct_heading(tello, target_yaw):
 
 def do_move(tello, tracker, target_yaw, action, cm):
     print(f"\n>> {action} {cm} سم")
+    tracker.event(f"{action} {cm}")
     if action in ("right", "left"):
         lateral_move(tello, tracker, action, cm)
         tracker.reset()          # المسار الجديد هو المرجع
@@ -184,10 +220,12 @@ def run(tello):
         target_yaw = tello.get_yaw()
         tello.takeoff()
 
-        # تثبيت بعد الإقلاع: مراقبة قصيرة ثم تصحيح لو انحرفت
+        # تثبيت بعد الإقلاع ثم معايرة خطأ الحساس
         time.sleep(STABILIZE_SEC)
-        print(">> فحص الانحراف بعد الإقلاع")
-        correct_drift(tello, tracker)
+        print(f">> معايرة الحساس ({CALIBRATE_SEC:.0f} ثواني تحويم بدون حركة)...")
+        bias, n = tracker.calibrate(CALIBRATE_SEC)
+        print(f"   خطأ الحساس = {bias:+.2f} dm/s  (من {n} قراءة)")
+        tracker.event(f"calibrated bias={bias:.2f}")
         correct_heading(tello, target_yaw)
 
         for action, cm in MISSION:
@@ -201,6 +239,9 @@ def run(tello):
 
 
 # ------------------ طائرة وهمية للتجربة ------------------
+SIM_SENSOR_BIAS = 0.0
+
+
 class FakeTello:
     SIM_SPEED = 50   # سم/ث في المحاكاة
 
@@ -208,7 +249,9 @@ class FakeTello:
         self.y = 0.0
         self.cmd_vy = 0.0
         self.flying = False
+        self.moving = False
         self.wind = random.choice([-1, 1]) * random.uniform(8, 15)
+        self.sensor_bias = SIM_SENSOR_BIAS   # خطأ ثابت في الحساس (dm/s)
         threading.Thread(target=self._physics, daemon=True).start()
 
     def _physics(self):
@@ -218,10 +261,11 @@ class FakeTello:
             if self.flying:
                 if random.random() < 0.003:
                     self.wind = -self.wind
-                self.y += (self.wind + self.cmd_vy) * dt
+                self.y += self._vy() * dt
 
     def _vy(self):
-        return (self.wind if self.flying else 0) + self.cmd_vy
+        # بعد الإقلاع وقبل أول حركة، Tello تثبت نفسها فلا تتأثر بالريح
+        return (self.wind if self.flying and self.moving else 0) + self.cmd_vy
 
     def connect(self): print("[sim] connected")
     def get_battery(self): return 90
@@ -231,11 +275,13 @@ class FakeTello:
     def end(self): pass
     def get_yaw(self): return 0
     # الطائرة الحقيقية تعطي vgy بإشارة معكوسة (يمين = سالب)، فالمحاكاة تقلّدها
-    def get_speed_y(self): return round(-self._vy() / SPEED_TO_CM_S)
+    def get_speed_y(self): return round(-self._vy() / SPEED_TO_CM_S + self.sensor_bias + random.uniform(-0.5, 0.5))
     def rotate_clockwise(self, d): pass
     def rotate_counter_clockwise(self, d): pass
 
-    def _wait(self, cm): time.sleep(cm / self.SIM_SPEED)
+    def _wait(self, cm):
+        self.moving = True
+        time.sleep(cm / self.SIM_SPEED)
     def move_forward(self, cm): self._wait(cm)
     def move_up(self, cm): self._wait(cm)
     def move_down(self, cm): self._wait(cm)
@@ -253,8 +299,12 @@ class FakeTello:
 def main():
     parser = argparse.ArgumentParser(description="Tello mission with drift correction")
     parser.add_argument("--simulate", action="store_true", help="تجربة بدون طائرة")
+    parser.add_argument("--sim-bias", type=float, default=0.0,
+                        help="خطأ حساس وهمي في المحاكاة (dm/s)")
     args = parser.parse_args()
     if args.simulate:
+        global SIM_SENSOR_BIAS
+        SIM_SENSOR_BIAS = args.sim_bias
         tello = FakeTello()
     else:
         from djitellopy import Tello
